@@ -73,7 +73,7 @@ export class StreamTransformer {
     };
   }
 
-  async *transform(source: AsyncIterable<SseMessage>): AsyncGenerator<SseMessage> {
+  async *transform(source: Iterable<SseMessage> | AsyncIterable<SseMessage>): AsyncGenerator<SseMessage> {
     for await (const msg of source) {
       // Pass through comments directly
       if (msg.type === "comment") {
