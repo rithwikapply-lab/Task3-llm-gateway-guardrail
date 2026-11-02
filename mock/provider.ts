@@ -34,6 +34,7 @@ export class MockProviderServer {
 
   private releaseResolvers = new Map<number, () => void>();
   private releasedSteps = new Set<number>();
+  private sockets = new Set<any>();
 
   constructor(port = 4001) {
     this.port = port;
@@ -381,10 +382,18 @@ export class MockProviderServer {
         }
         resolve(this.port);
       });
+      this.server.on("connection", (socket) => {
+        this.sockets.add(socket);
+        socket.on("close", () => this.sockets.delete(socket));
+      });
     });
   }
 
   async close(): Promise<void> {
+    for (const s of this.sockets) {
+      s.destroy();
+    }
+    this.sockets.clear();
     if (this.server) {
       await new Promise<void>((resolve) => {
         this.server?.close(() => resolve());
