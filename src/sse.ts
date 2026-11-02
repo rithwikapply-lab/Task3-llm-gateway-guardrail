@@ -27,6 +27,7 @@ export class SseParser {
   private buffer = "";
   private scanOffset = 0;
   private maxEventBytes: number;
+  private pendingCr = false;
 
   private currentDataLines: string[] = [];
   private currentEventName?: string;
@@ -54,6 +55,16 @@ export class SseParser {
       return [];
     }
 
+    if (this.pendingCr) {
+      this.pendingCr = false;
+      if (text.startsWith("\n")) {
+        text = text.slice(1);
+        if (!text) {
+          return [];
+        }
+      }
+    }
+
     this.buffer += text;
     return this.parseBuffer();
   }
@@ -62,17 +73,38 @@ export class SseParser {
    * Flushes any remaining bytes in the decoder and buffer.
    */
   flush(): SseMessage[] {
+    this.pendingCr = false;
     const remainingText = this.decoder.decode();
     if (remainingText) {
       this.buffer += remainingText;
     }
 
-    const messages = this.parseBuffer();
+    const messages = this.parseBuffer(true);
 
-    // If there is any trailing unterminated event with data, dispatch it
+    if (this.buffer.length > 0) {
+      const line = this.buffer;
+      this.buffer = "";
+      this.scanOffset = 0;
+      if (line.startsWith(":")) {
+        messages.push({
+          type: "comment",
+          comment: line.slice(1).replace(/^\s/, ""),
+          raw: line
+        });
+      } else if (line.startsWith("data:")) {
+        let dataVal = line.slice(5);
+        if (dataVal.startsWith(" ")) {
+          dataVal = dataVal.slice(1);
+        }
+        this.currentDataLines.push(dataVal);
+        this.currentRawLines.push(line);
+      }
+    }
+
+    // If there is any trailing event with data, dispatch it
     if (this.currentDataLines.length > 0 || this.currentEventName || this.currentId) {
       const data = this.currentDataLines.join("\n");
-      const raw = this.currentRawLines.join("") + (this.buffer ? this.buffer : "");
+      const raw = this.currentRawLines.join("");
       messages.push({
         type: "event",
         event: this.currentEventName,
@@ -82,17 +114,6 @@ export class SseParser {
         raw
       });
       this.resetEventState();
-      this.buffer = "";
-      this.scanOffset = 0;
-    } else if (this.buffer.startsWith(":")) {
-      const commentText = this.buffer.slice(1).replace(/^\s/, "");
-      messages.push({
-        type: "comment",
-        comment: commentText,
-        raw: this.buffer
-      });
-      this.buffer = "";
-      this.scanOffset = 0;
     }
 
     return messages;
@@ -106,7 +127,7 @@ export class SseParser {
     this.currentEventByteCount = 0;
   }
 
-  private parseBuffer(): SseMessage[] {
+  private parseBuffer(isFlush = false): SseMessage[] {
     const messages: SseMessage[] = [];
 
     while (this.scanOffset < this.buffer.length) {
@@ -120,15 +141,19 @@ export class SseParser {
           delimLen = 1;
           break;
         } else if (code === 13 /* \r */) {
-          if (i === this.buffer.length - 1) {
-            // \r at buffer boundary: wait for potential \n in next chunk
-            this.scanOffset = i;
-            return messages;
-          }
-          if (this.buffer.charCodeAt(i + 1) === 10 /* \n */) {
-            newlineIdx = i;
-            delimLen = 2;
+          if (i + 1 < this.buffer.length) {
+            if (this.buffer.charCodeAt(i + 1) === 10 /* \n */) {
+              newlineIdx = i;
+              delimLen = 2;
+            } else {
+              newlineIdx = i;
+              delimLen = 1;
+            }
           } else {
+            if (!isFlush) {
+              this.scanOffset = i;
+              return messages;
+            }
             newlineIdx = i;
             delimLen = 1;
           }
@@ -137,7 +162,6 @@ export class SseParser {
       }
 
       if (newlineIdx === -1) {
-        // No more newlines in buffer
         this.scanOffset = this.buffer.length;
         if (this.currentEventByteCount + this.buffer.length > this.maxEventBytes) {
           throw new SseOversizedEventError(
@@ -152,19 +176,15 @@ export class SseParser {
       const rawDelim = this.buffer.slice(newlineIdx, newlineIdx + delimLen);
       const rawLineWithDelim = line + rawDelim;
 
-      // Advance buffer past this line
       this.buffer = this.buffer.slice(newlineIdx + delimLen);
       this.scanOffset = 0;
 
-      // Track byte size for maxEventBytes limit check
       this.currentEventByteCount += Buffer.byteLength(rawLineWithDelim);
       if (this.currentEventByteCount > this.maxEventBytes) {
         throw new SseOversizedEventError(this.currentEventByteCount, this.maxEventBytes);
       }
 
-      // Check line semantics
       if (line === "") {
-        // Empty line indicates event boundary
         if (this.currentDataLines.length > 0 || this.currentEventName || this.currentId) {
           const data = this.currentDataLines.join("\n");
           this.currentRawLines.push(rawLineWithDelim);
@@ -180,7 +200,6 @@ export class SseParser {
         }
         this.resetEventState();
       } else if (line.startsWith(":")) {
-        // Comment / keepalive
         const comment = line.slice(1).replace(/^\s/, "");
         messages.push({
           type: "comment",
