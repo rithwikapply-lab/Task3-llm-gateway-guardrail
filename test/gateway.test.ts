@@ -534,4 +534,73 @@ describe("Gateway Integration Tests", () => {
       await gw.close();
     }
   });
+  it("backpressure: fake writable returning false pauses pulling upstream until drain and keeps pending bounded", async () => {
+    let drainCb: (() => void) | null = null;
+    let writeCount = 0;
+    let isFinished = false;
+
+    const fakeRes: any = new (require("events").EventEmitter)();
+    fakeRes.writeHead = () => {};
+    fakeRes.write = () => {
+      writeCount++;
+      return false; // Backpressure triggered
+    };
+    fakeRes.once = (event: string, cb: () => void) => {
+      if (event === "drain") {
+        drainCb = cb;
+      }
+      return fakeRes;
+    };
+    fakeRes.end = () => {
+      isFinished = true;
+    };
+
+    const fakeReq: any = new (require("events").EventEmitter)();
+    fakeReq.headers = { accept: "text/event-stream" };
+    fakeReq.body = {
+      model: "test-model",
+      messages: [{ role: "user", content: "test backpressure" }],
+      stream: true,
+      mock: {
+        text: "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+        chunkSizes: [2]
+      }
+    };
+
+    const config: GatewayConfig = {
+      port: 0,
+      upstreamUrl: "http://127.0.0.1:" + mockPort + "/v1/chat/completions",
+      upstreamApiKey: "test-key",
+      upstreamIdleTimeoutMs: 5000,
+      maxEventBytes: 1048576
+    };
+
+    const forwardPromise = (await import("../src/forward.js")).forwardChatCompletion(
+      fakeReq,
+      fakeRes,
+      config,
+      testLogger,
+      "bp-test-req"
+    );
+
+    while (writeCount === 0 || !drainCb) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
+    const pausedWrites = writeCount;
+    await new Promise((r) => setTimeout(r, 60));
+    expect(writeCount).toBe(pausedWrites);
+
+    while (!isFinished) {
+      if (drainCb) {
+        const cb = drainCb;
+        drainCb = null;
+        cb();
+      }
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
+    await forwardPromise;
+    expect(writeCount).toBeGreaterThan(pausedWrites);
+  });
 });
