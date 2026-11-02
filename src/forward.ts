@@ -282,13 +282,10 @@ export async function forwardChatCompletion(
       for await (const outMsg of transformer.transform(flushed)) {
         await writeEventWithBackpressure(outMsg.raw);
       }
-    } else {
-      // Ensure transformer flushes any remaining held text
-      for await (const outMsg of transformer.transform([])) {
-        await writeEventWithBackpressure(outMsg.raw);
-      }
     }
-
+    for (const outMsg of transformer.flush()) {
+      await writeEventWithBackpressure(outMsg.raw);
+    }
     res.end();
   } catch (err: any) {
     upstreamFinished = true;
@@ -296,7 +293,12 @@ export async function forwardChatCompletion(
       // Flush held text first before sending error
       try {
         const remaining = parser.flush();
-        for await (const outMsg of transformer.transform(remaining)) {
+        if (remaining.length > 0) {
+          for await (const outMsg of transformer.transform(remaining)) {
+            await writeEventWithBackpressure(outMsg.raw);
+          }
+        }
+        for (const outMsg of transformer.flush()) {
           await writeEventWithBackpressure(outMsg.raw);
         }
       } catch {}

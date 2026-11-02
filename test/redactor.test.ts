@@ -18,6 +18,7 @@ describe("redactor pattern tests", () => {
     const nearMisses = [
       "123-45-678",
       "1234-56-7890",
+      "123-45-67890",
       "2024-01-15",
       "version 1.2.3",
       "a@b",

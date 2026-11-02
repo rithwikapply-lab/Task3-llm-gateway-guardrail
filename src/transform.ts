@@ -85,7 +85,7 @@ export class StreamTransformer {
 
       // Handle [DONE]
       if (event.data === "[DONE]") {
-        yield* this.flushAllPending();
+        
         yield event;
         return;
       }
@@ -258,7 +258,10 @@ export class StreamTransformer {
       }
     }
 
-    // Upstream stream ended without [DONE]: flush any remaining held text
+
+  }
+
+  *flush(): Generator<SseMessage> {
     yield* this.flushAllPending();
   }
 

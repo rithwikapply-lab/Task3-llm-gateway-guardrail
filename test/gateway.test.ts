@@ -157,7 +157,7 @@ describe("Gateway Integration Tests", () => {
         model: "test-model",
         messages: [{ role: "user", content: "hi" }],
         stream: true,
-        mock: { text: "ABCDEFGHIJKL", chunkSizes: [4], gate: true }
+        mock: { text: "hello,world,again,", chunkSizes: [6, 6, 6], gate: true }
       });
       let receivedFirst = false;
       let receivedSecond = false;
@@ -175,11 +175,11 @@ describe("Gateway Integration Tests", () => {
         clientReq.on("response", (res) => {
           const parser = new SseParser();
           res.on("data", (chunk) => {
-            const msgs = parser.push(chunk);
+                        const msgs = parser.push(chunk);
             for (const m of msgs) {
               if (m.type === "event") {
-                if (m.data.includes("ABCD")) receivedFirst = true;
-                if (m.data.includes("EFGH")) receivedSecond = true;
+                if (m.data.includes("hello,")) receivedFirst = true;
+                if (m.data.includes("world,")) receivedSecond = true;
               }
             }
           });
@@ -514,6 +514,8 @@ describe("Gateway Integration Tests", () => {
       expect(mockProvider.stats.recordedHeaderNames.length).toBeGreaterThanOrEqual(1);
       const headersSeen = mockProvider.stats.recordedHeaderNames[0];
       expect(headersSeen).toContain("authorization");
+      expect(mockProvider.stats.authHeaders[0]).toBe("Bearer gateway-upstream-secret-key");
+      expect(mockProvider.stats.authHeaders[0]).not.toContain(clientAuthSecret);
 
       expect(loggedLines.length).toBeGreaterThanOrEqual(1);
       for (const line of loggedLines) {
@@ -593,7 +595,7 @@ describe("Gateway Integration Tests", () => {
 
     while (!isFinished) {
       if (drainCb) {
-        const cb = drainCb;
+        const cb: any = drainCb;
         drainCb = null;
         cb();
       }
@@ -602,5 +604,102 @@ describe("Gateway Integration Tests", () => {
 
     await forwardPromise;
     expect(writeCount).toBeGreaterThan(pausedWrites);
+  });
+
+  it("does not bleed redactor state across choices (independent choice redactors)", async () => {
+    const gw = await startGateway();
+    try {
+      const res = await postJson(gw.port, "/v1/chat/completions", {
+        model: "test-model",
+        messages: [{ role: "user", content: "hi" }],
+        stream: true,
+        mock: {
+          choices: [
+            "Contact user@",
+            "domain.com is great"
+          ],
+          chunkSizes: [4]
+        }
+      });
+      expect(res.status).toBe(200);
+      // Because choice 0 and choice 1 have independent redactors, they should NOT merge into user@domain.com
+      expect(res.body).toContain("user@");
+      expect(res.body).toContain("domain.com");
+    } finally {
+      await gw.close();
+    }
+  });
+
+  it("does not flush candidate PII prematurely on silence/delay (no timer-based flush)", async () => {
+    const gw = await startGateway();
+    mockProvider.reset();
+    try {
+      const payload = JSON.stringify({
+        model: "test-model",
+        messages: [{ role: "user", content: "hi" }],
+        stream: true,
+        mock: {
+          text: "hello alice@corp.com bye",
+          chunkSizes: [12, 12], // "hello alice@", "corp.com bye"
+          gate: true
+        }
+      });
+
+      let clientText = "";
+      const clientReq = http.request({
+        hostname: "127.0.0.1",
+        port: gw.port,
+        path: "/v1/chat/completions",
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(payload)
+        }
+      });
+
+      const donePromise = new Promise<void>((resolve) => {
+        clientReq.on("response", (res) => {
+          const parser = new SseParser();
+          res.on("data", (chunk) => {
+            const msgs = parser.push(chunk);
+            for (const m of msgs) {
+              if (m.type === "event" && !m.isDone) {
+                try {
+                  const parsed = JSON.parse(m.data);
+                  if (parsed.choices?.[0]?.delta?.content) {
+                    clientText += parsed.choices[0].delta.content;
+                  }
+                } catch {}
+              }
+            }
+          });
+          res.on("end", resolve);
+        });
+      });
+
+      clientReq.write(payload);
+      clientReq.end();
+
+      // Release step 1 (role) and step 2 ("hello alice@")
+      mockProvider.release(1);
+      mockProvider.release(2);
+
+      // Wait 75 ms (longer than any 50ms silence timer)
+      await new Promise((r) => setTimeout(r, 75));
+
+      // alice@ MUST NOT be emitted prematurely
+      expect(clientText).not.toContain("alice@");
+
+      // Release step 3 ("corp.com bye"), step 4 (finish), step 5 ([DONE])
+      mockProvider.release(3);
+      mockProvider.release(4);
+      mockProvider.release(5);
+
+      await donePromise;
+      expect(clientText).not.toContain("alice@corp.com");
+      expect(clientText).toContain("[REDACTED]");
+    } finally {
+      await gw.close();
+    }
   });
 });

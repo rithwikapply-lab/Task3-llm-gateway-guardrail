@@ -20,6 +20,7 @@ export interface MockStats {
   requestCount: number;
   clientDisconnects: number;
   recordedHeaderNames: string[][];
+  authHeaders: string[];
 }
 
 export class MockProviderServer {
@@ -30,7 +31,8 @@ export class MockProviderServer {
   public stats: MockStats = {
     requestCount: 0,
     clientDisconnects: 0,
-    recordedHeaderNames: []
+    recordedHeaderNames: [],
+    authHeaders: []
   };
 
   private releaseResolvers = new Map<number, () => void>();
@@ -48,7 +50,8 @@ export class MockProviderServer {
     this.stats = {
       requestCount: 0,
       clientDisconnects: 0,
-      recordedHeaderNames: []
+      recordedHeaderNames: [],
+      authHeaders: []
     };
     this.releaseResolvers.clear();
     this.releasedSteps.clear();
@@ -95,6 +98,7 @@ export class MockProviderServer {
     this.app.post("/v1/chat/completions", async (req: Request, res: Response) => {
       this.stats.requestCount++;
       this.stats.recordedHeaderNames.push(Object.keys(req.headers).map((h) => h.toLowerCase()));
+      this.stats.authHeaders.push(String(req.headers["authorization"] || ""));
 
       let completed = false;
       res.on("close", () => {
