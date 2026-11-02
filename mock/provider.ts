@@ -13,6 +13,7 @@ export interface MockScript {
   status?: number;
   dropAfter?: number;
   stallAfter?: number;
+  repeat?: number;
 }
 
 export interface MockStats {
@@ -319,8 +320,6 @@ export class MockProviderServer {
       }
 
       // 3. Standard single-choice text streaming
-      const text = mock.text ?? "Hello from mock provider";
-
       // Step 1: Leading role-only chunk
       const okRole = await sendChunk(
         JSON.stringify({
@@ -333,25 +332,29 @@ export class MockProviderServer {
       );
       if (!okRole) return;
 
-      // Text chunks split by chunkSizes
-      let offset = 0;
-      let sizeIdx = 0;
-      while (offset < text.length) {
-        const size = chunkSizes[sizeIdx % chunkSizes.length];
-        const piece = text.slice(offset, offset + size);
-        offset += size;
-        sizeIdx++;
+      const baseText = mock.text ?? "Hello from mock provider";
+      const repeat = mock.repeat ?? 1;
 
-        const ok = await sendChunk(
-          JSON.stringify({
-            id,
-            object: "chat.completion.chunk",
-            created,
-            model,
-            choices: [{ index: 0, delta: { content: piece }, finish_reason: null }]
-          })
-        );
-        if (!ok) return;
+      for (let r = 0; r < repeat; r++) {
+        let offset = 0;
+        let sizeIdx = 0;
+        while (offset < baseText.length) {
+          const size = chunkSizes[sizeIdx % chunkSizes.length];
+          const piece = baseText.slice(offset, offset + size);
+          offset += size;
+          sizeIdx++;
+
+          const ok = await sendChunk(
+            JSON.stringify({
+              id,
+              object: "chat.completion.chunk",
+              created,
+              model,
+              choices: [{ index: 0, delta: { content: piece }, finish_reason: null }]
+            })
+          );
+          if (!ok) return;
+        }
       }
 
       // Finish chunk
