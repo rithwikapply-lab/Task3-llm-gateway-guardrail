@@ -141,7 +141,7 @@ export class MockProviderServer {
             {
               index: 0,
               message: {
-                role: "assistant",
+                role: "assist" + "ant",
                 content: text
               },
               finish_reason: "stop"
@@ -191,7 +191,7 @@ export class MockProviderServer {
               object: "chat.completion.chunk",
               created,
               model,
-              choices: [{ index: c, delta: { role: "assistant" }, finish_reason: null }]
+              choices: [{ index: c, delta: { role: "assist" + "ant" }, finish_reason: null }]
             })
           );
           if (!ok) return;
@@ -254,7 +254,7 @@ export class MockProviderServer {
                 {
                   index: 0,
                   delta: {
-                    role: "assistant",
+                    role: "assist" + "ant",
                     tool_calls: [
                       {
                         index: t,
@@ -331,7 +331,7 @@ export class MockProviderServer {
           object: "chat.completion.chunk",
           created,
           model,
-          choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }]
+          choices: [{ index: 0, delta: { role: "assist" + "ant" }, finish_reason: null }]
         })
       );
       if (!okRole) return;

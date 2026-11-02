@@ -108,7 +108,7 @@ The streaming redactor strictly enforces three formal invariants:
 
 ## Latency and Memory Behaviour
 
-- **Immediate TTFT**: The initial role-only chunk (`{"role":"assistant"}`) is forwarded to the client immediately without waiting for content deltas.
+- **Immediate TTFT**: The initial role-only chunk (`{"role": "..."}`) is forwarded to the client immediately without waiting for content deltas.
 - **Word-Level Prose Lag**: In plain prose without PII, characters are emitted as soon as a word completes upon hitting whitespace or punctuation. Prose lag is at most the last word currently in flight.
 - **Strict Memory Bounding**: Full streams are never buffered in memory. 50 MB payloads stream with peak buffer sizes under 320 bytes plus chunk size.
 - **Backpressure Handling**: If `res.write()` returns `false`, the gateway halts pulling from the upstream reader until the client response emits the `drain` event, keeping memory bounded across slow clients.

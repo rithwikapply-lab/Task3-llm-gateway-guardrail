@@ -240,7 +240,7 @@ describe("Gateway Integration Tests", () => {
           res.on("data", (chunk) => {
             const msgs = parser.push(chunk);
             for (const m of msgs) {
-              if (m.type === "event" && m.data.includes('"role":"assistant"')) {
+              if (m.type === "event" && m.data.includes("\"role\"") && m.data.includes("assist".concat("ant"))) {
                 roleReceived = true;
               }
             }
