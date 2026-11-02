@@ -1,0 +1,22 @@
+{
+  "name": "llm-gateway-guardrail",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/src/index.js",
+    "start:mock": "node dist/mock/provider.js",
+    "pretest": "npm run build",
+    "test": "vitest run",
+    "bench": "npm run build && node dist/scripts/bench.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2",
+    "vitest": "^3.0.7"
+  }
+}
