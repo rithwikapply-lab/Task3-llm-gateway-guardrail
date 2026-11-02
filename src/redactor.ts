@@ -79,6 +79,8 @@ export function findMatches(text: string): PiiMatch[] {
   while ((cm = CARD_PATTERN.exec(text)) !== null) {
     if (isValidLuhn(cm[0])) {
       matches.push({ start: cm.index, end: cm.index + cm[0].length, type: "card", text: cm[0] });
+    } else {
+      CARD_PATTERN.lastIndex = cm.index + 1;
     }
   }
 
@@ -197,13 +199,18 @@ export class StreamRedactor {
     const matches = findMatches(this.ctx + this.pending);
     const ctxLen = this.ctx.length;
 
-    // Convert matches to pending coordinates
+    // Convert matches to pending coordinates.
+    // Matches with start < ctxLen start inside ctx (which was already emitted);
+    // ctx is only provided as left-context for lookbehind of matches starting in pending.
     const pendingMatches: PiiMatch[] = [];
     for (const m of matches) {
-      const start = Math.max(0, m.start - ctxLen);
-      const end = m.end - ctxLen;
-      if (end > 0) {
-        pendingMatches.push({ start, end, type: m.type, text: m.text });
+      if (m.start >= ctxLen) {
+        pendingMatches.push({
+          start: m.start - ctxLen,
+          end: m.end - ctxLen,
+          type: m.type,
+          text: m.text
+        });
       }
     }
 
@@ -247,10 +254,13 @@ export class StreamRedactor {
 
     const pendingMatches: PiiMatch[] = [];
     for (const m of matches) {
-      const start = Math.max(0, m.start - ctxLen);
-      const end = m.end - ctxLen;
-      if (end > 0) {
-        pendingMatches.push({ start, end, type: m.type, text: m.text });
+      if (m.start >= ctxLen) {
+        pendingMatches.push({
+          start: m.start - ctxLen,
+          end: m.end - ctxLen,
+          type: m.type,
+          text: m.text
+        });
       }
     }
 
