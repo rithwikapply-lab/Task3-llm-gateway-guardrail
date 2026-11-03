@@ -15,11 +15,18 @@ export function createApp(config: GatewayConfig, logger: Logger = defaultLogger)
     res.status(200).json({ status: "ok" });
   });
 
-  // Debug GC endpoint (active when started with node --expose-gc)
-  if (typeof (global as any).gc === "function") {
+  // Debug GC endpoint (active only when BENCH_GC=1 and started with node --expose-gc)
+  if (process.env.BENCH_GC === "1" && typeof (global as any).gc === "function") {
     app.post("/__gc", (_req: Request, res: Response) => {
       (global as any).gc();
-      res.status(200).json({ ok: true });
+      const mem = process.memoryUsage();
+      res.status(200).json({
+        heapUsed: mem.heapUsed,
+        heapTotal: mem.heapTotal,
+        external: mem.external,
+        arrayBuffers: mem.arrayBuffers,
+        rss: mem.rss
+      });
     });
   }
 

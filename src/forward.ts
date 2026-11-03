@@ -79,6 +79,7 @@ export async function forwardChatCompletion(
           redactions: { email: 0, ssn: 0, card: 0, total: 0 },
           peakPending: 0
         });
+        res.removeListener("close", onClientClose);
         return;
       }
 
@@ -134,6 +135,7 @@ export async function forwardChatCompletion(
         redactions: redactionCounts,
         peakPending: 0
       });
+      res.removeListener("close", onClientClose);
       return;
     } catch (err: any) {
       if (clientDisconnected) return;
@@ -155,6 +157,7 @@ export async function forwardChatCompletion(
         redactions: { email: 0, ssn: 0, card: 0, total: 0 },
         peakPending: 0
       });
+      res.removeListener("close", onClientClose);
       return;
     }
   }
@@ -336,6 +339,10 @@ export async function forwardChatCompletion(
       res.end();
     }
   } finally {
+    res.removeListener("close", onClientClose);
+    if (!upstreamFinished && reader) {
+      reader.cancel().catch(() => {});
+    }
     const totalMs = Math.round(performance.now() - startTime);
     const stats = transformer.getStats();
     logger.logRequest({

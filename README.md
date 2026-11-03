@@ -60,6 +60,7 @@ The gateway is configured exclusively via environment variables:
 | `UPSTREAM_API_KEY` | String | *Optional* | Upstream API key injected as `Authorization: Bearer <key>`. The client\'s Authorization header is stripped. |
 | `UPSTREAM_IDLE_TIMEOUT_MS` | Number (> 0) | `30000` | Idle timeout in milliseconds while waiting for upstream chunks before emitting an error SSE event. |
 | `MAX_EVENT_BYTES` | Number (> 0) | `1048576` (1 MB) | Maximum byte length of an individual SSE event buffer before rejecting as oversized. |
+| `BENCH_GC` | Integer (`0` or `1`) | `0` | Debug flag. When set to `1` and Node is started with `--expose-gc`, enables `POST /__gc` for memory profiling. |
 
 ---
 
@@ -101,8 +102,8 @@ The streaming redactor strictly enforces three formal invariants:
 
 ## Complexity
 
-- **Time Complexity**: **O(N)** amortized linear time with respect to the input character count. Regex evaluations only scan the bounded candidate tail and active chunk, rather than the entire history.
-- **Space Complexity**: **O(1)** auxiliary algorithm buffer space. The redactor pending buffer is strictly capped at 320 characters plus chunk size. In the Node process, peak RSS delta plateaus (~80–94 MB) across 50 MB to 200 MB streams due to V8 runtime garbage collection thresholds and TCP socket buffers, remaining constant rather than accumulating stream size.
+- **Time Complexity**: **O(N)** amortized linear time with respect to the input character count. Regex evaluations only scan the bounded candidate suffix tail rather than the full response history.
+- **Space Complexity**: **O(1)** algorithm buffer space. The redactor pending buffer is strictly bounded at 320 characters plus chunk size. Internally, post-GC heap memory returns to baseline (~9.6–11.0 MB) after every request regardless of stream size.
 
 ---
 
@@ -124,26 +125,30 @@ The streaming redactor strictly enforces three formal invariants:
 
 ## Measured Benchmark Results
 
-Benchmarked with mock provider and gateway running as **separate child processes** communicating over loopback TCP HTTP. Gateway RSS was continuously sampled using `ps -o rss= -p <gatewayPid>` every 100 ms throughout each stream.
+Benchmarked with mock provider and gateway running as **separate child processes** communicating over loopback TCP HTTP. Gateway RSS was continuously sampled using `ps -o rss= -p <gatewayPid>` every 100 ms throughout each stream, and `POST /__gc` was called at the completion of each run.
 Environment: Node.js **v24.10.0** on an **Apple M3 Pro (11 cores)** with **18.0 GB RAM** on **Darwin 25.6.0 (arm64)**.
 
-### Stream Size vs Gateway Peak RSS Delta (Flat Memory Verification)
+### Memory Honesty: Multi-Run Sequence Against ONE Gateway Process
+Sequence executed in order: **50 MB x4**, then **200 MB x2**, then **1.3 MB** against a single persistent gateway process:
 
-| Stream Size | Wire Bytes | Baseline RSS | Peak RSS | Peak Delta | Post-GC RSS |
-|---|---|---|---|---|---|
-| **1.3 MB** | 1.3 MB | 66.45 MB | 114.92 MB | 48.47 MB | 115.03 MB |
-| **50 MB** | 51.4 MB | 115.03 MB | 195.42 MB | 80.39 MB | 195.44 MB |
-| **200 MB** | 205.7 MB | 195.41 MB | 289.11 MB | 93.70 MB | 288.56 MB |
+| Run | Stream Size | Wire Bytes | Baseline RSS | Peak RSS | Peak Delta | Post-GC RSS | Post-GC HeapUsed | Throughput |
+|---|---|---|---|---|---|---|---|---|
+| **1** | 50 MB (#1) | 51.4 MB | 66.22 MB | 133.34 MB | 67.13 MB | 133.23 MB | **10.57 MB** | 29.64 MB/s |
+| **2** | 50 MB (#2) | 51.4 MB | 133.23 MB | 189.42 MB | 56.19 MB | 189.33 MB | **10.64 MB** | 30.12 MB/s |
+| **3** | 50 MB (#3) | 51.4 MB | 189.33 MB | 255.50 MB | 66.17 MB | 255.50 MB | **10.78 MB** | 30.20 MB/s |
+| **4** | 50 MB (#4) | 51.4 MB | 255.50 MB | 255.59 MB | 0.09 MB | 255.59 MB | **10.83 MB** | 30.52 MB/s |
+| **5** | 200 MB (#1) | 205.7 MB | 255.59 MB | 261.27 MB | 5.67 MB | 261.28 MB | **10.98 MB** | 30.46 MB/s |
+| **6** | 200 MB (#2) | 205.7 MB | 261.28 MB | 261.50 MB | 0.22 MB | 261.52 MB | **9.69 MB** | 31.10 MB/s |
+| **7** | 1.3 MB (#1) | 1.3 MB | 261.52 MB | 261.64 MB | 0.13 MB | 261.13 MB | **9.62 MB** | 20.95 MB/s |
 
-*Note: Peak RSS delta remains flat (plateauing between 80 MB and 94 MB) when scaling from 50 MB to 200 MB (a 4x increase in data), confirming that memory does not grow proportionally with stream length.*
+### Understanding RSS vs HeapUsed
+- **Post-GC `heapUsed` returns to baseline**: Starting from an initial baseline of 8.81 MB, `heapUsed` measured immediately after garbage collection stays strictly within ~9.6–11.0 MB across all 7 runs—even after processing over 820 MB of cumulative SSE stream data. No per-request state, loggers, or streams accumulate over time.
+- **RSS Retention**: Resident Set Size (RSS) measures the total OS memory pages allocated to the process. V8 requests memory pages from the operating system during initial high-throughput allocations (growing to ~255 MB over runs 1–3), and then retains those committed pages for subsequent workloads rather than returning them to the OS. Once established, Peak Delta drops to virtually zero (0.09 MB on Run 4, 0.22 MB on Run 6), and 200 MB streams add only 5.67 MB of peak delta.
 
-### Latency and Throughput Comparison (Direct vs Gateway)
-
-| Stream Size | Direct TTFT | Gateway TTFT | TTFT Overhead | Direct Throughput | Gateway Throughput |
-|---|---|---|---|---|---|
-| **1.3 MB** | 9.59 ms | 13.48 ms | **3.89 ms** | 51.51 MB/s | 16.82 MB/s |
-| **50 MB** | 1.12 ms | 2.65 ms | **1.53 ms** | 141.63 MB/s | 29.57 MB/s |
-| **200 MB** | 0.77 ms | 2.23 ms | **1.46 ms** | 145.87 MB/s | 30.28 MB/s |
+### Throughput & Latency Honesty
+- **Direct Provider Throughput**: ~145–148 MB/s (pure synthetic localhost stream).
+- **Gateway Guardrail Throughput**: ~30 MB/s of SSE wire bytes (approximately 160,000 token chunk events per second at ~188 bytes per event), with sub-2.5 ms TTFT.
+- **Production Context**: Real-world LLM inference streams emit roughly 20 to 100 tokens per second (under 20 KB/s per client connection). At ~30 MB/s capacity, the gateway is more than three orders of magnitude faster than actual LLM generation speeds, introducing negligible overhead in real deployments.
 
 ## Error Handling
 

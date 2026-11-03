@@ -594,9 +594,11 @@ describe("Gateway Integration Tests", () => {
     await firstWritePromise;
     expect(writeCount).toBe(1);
 
-    // Assert that no further upstream read calls happen while paused waiting for drain
+    // Assert that no further upstream read calls happen across several event-loop turns while paused waiting for drain
     const readsWhenPaused = readSpy.mock.calls.length;
-    await Promise.resolve();
+    for (let i = 0; i < 5; i++) {
+      await new Promise((r) => setImmediate(r));
+    }
     expect(readSpy.mock.calls.length).toBe(readsWhenPaused);
 
     // Emit drain to release backpressure
