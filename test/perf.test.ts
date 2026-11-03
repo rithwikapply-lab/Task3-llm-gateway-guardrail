@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { StreamRedactor } from "../src/redactor.js";
+import { SseParser } from "../src/sse.js";
+import { StreamTransformer } from "../src/transform.js";
 
 describe("latency and memory tests", () => {
   it("char-by-char pushes of \"Hello world, nice day\" show prose lag at most the last word", () => {
@@ -66,5 +68,57 @@ describe("latency and memory tests", () => {
     expect(stats.charsOut).toBe(totalEmitted);
     expect(stats.peakPending).toBeLessThanOrEqual(320 + chunkSize);
     expect(redactor.pendingLength).toBe(0);
+  });
+  it("1000-letter run lag bound: held back up to 320 characters then emitted steadily", () => {
+    const redactor = new StreamRedactor();
+    const letters = "a".repeat(1000);
+    let emitted = "";
+
+    for (let i = 0; i < letters.length; i++) {
+      const out = redactor.push(letters[i]);
+      emitted += out;
+      expect(redactor.pendingLength).toBeLessThanOrEqual(320);
+      if (i < 320) {
+        expect(emitted.length).toBe(0);
+        expect(redactor.pendingLength).toBe(i + 1);
+      } else {
+        expect(emitted.length).toBe(i + 1 - 320);
+        expect(redactor.pendingLength).toBe(320);
+      }
+    }
+
+    emitted += redactor.flush();
+    expect(emitted).toBe(letters);
+    expect(redactor.pendingLength).toBe(0);
+  });
+
+  it("streams a large scripted response and asserts heapUsed growth stays under bound after gc", async () => {
+    if (typeof (globalThis as any).gc === "function") {
+      (globalThis as any).gc();
+    }
+    const memBefore = process.memoryUsage().heapUsed;
+
+    const parser = new SseParser();
+    const transformer = new StreamTransformer();
+    const piiEvent =
+      'data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1700000000,"model":"test","choices":[{"index":0,"delta":{"content":"Contact alice@example.com or call 987-65-4321."},"finish_reason":null}]}\n\n';
+
+    for (let i = 0; i < 50000; i++) {
+      const msgs = parser.push(piiEvent);
+      for (const _out of transformer.transform(msgs)) {
+        // Discard emitted output to measure retained heap
+      }
+    }
+    parser.flush();
+    for (const _out of transformer.flush()) {}
+
+    if (typeof (globalThis as any).gc === "function") {
+      (globalThis as any).gc();
+    }
+    const memAfter = process.memoryUsage().heapUsed;
+    const growth = memAfter - memBefore;
+
+    // Retained heap growth after gc must stay under a small 5 MB bound
+    expect(growth).toBeLessThan(5 * 1024 * 1024);
   });
 });

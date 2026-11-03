@@ -115,6 +115,19 @@ describe("adversarial input performance", () => {
 
 describe("seeded fuzz test (2000 iterations)", () => {
   // Deterministic Mulberry32 PRNG
+  it("regression: long digit/dash runs preceding valid card with left-context", () => {
+    const text = "084253-272931126665012-9 718-3 9 0927906429351 6-9 ";
+    const expected = redactWhole(text);
+    const redactor = new StreamRedactor();
+    let streamed = "";
+    for (let i = 0; i < text.length; i++) {
+      streamed += redactor.push(text[i]);
+      expect(redactor.pendingLength).toBeLessThanOrEqual(320 + 1);
+    }
+    streamed += redactor.flush();
+    expect(streamed).toBe(expected);
+  });
+
   function mulberry32(a: number) {
     return function () {
       let t = (a += 0x6d2b79f5);
@@ -124,65 +137,116 @@ describe("seeded fuzz test (2000 iterations)", () => {
     };
   }
 
-  const rng = mulberry32(133742);
+  const FUZZ_SEED = 439041101;
+  const rng = mulberry32(FUZZ_SEED);
 
-  const fragments = [
-    "The quick brown fox jumps over the lazy dog. ",
-    "Contact us at hello@world.com for details. ",
-    "My SSN is 987-65-4321 and her SSN is 123-45-6789. ",
-    "Payment via 4111-1111-1111-1111 or 4111 1111 1111 1111. ",
-    "Near misses: 123-45-678, 1234-56-7890, 2024-01-15, v1.2.3, a@b, @handle. ",
-    "Failed card: 4111-1111-1111-1112. ",
-    "00000000001111111111222222222233333333334444444444 ",
-    "-------------------------------------------------- ",
-    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ ",
-    "Trailing punctuation test: email info@example.org. ",
-    "End of sentence. "
-  ];
-
-  it("verifies invariants 1 to 3 across 2000 random chunkings", () => {
-    for (let iter = 0; iter < 2000; iter++) {
-      // Build random composite text from 2 to 6 fragments
-      const numFrags = 2 + Math.floor(rng() * 5);
-      let text = "";
-      for (let f = 0; f < numFrags; f++) {
-        text += fragments[Math.floor(rng() * fragments.length)];
+  function makeLuhnCard(valid: boolean): string {
+    const len = 15;
+    let prefix = "";
+    for (let i = 0; i < len; i++) prefix += Math.floor(rng() * 10);
+    for (let d = 0; d <= 9; d++) {
+      const candidate = prefix + d;
+      if (isValidLuhn(candidate) === valid) {
+        if (rng() < 0.3) return candidate.slice(0, 4) + "-" + candidate.slice(4, 8) + "-" + candidate.slice(8, 12) + "-" + candidate.slice(12);
+        if (rng() < 0.6) return candidate.slice(0, 4) + " " + candidate.slice(4, 8) + " " + candidate.slice(8, 12) + " " + candidate.slice(12);
+        return candidate;
       }
+    }
+    return "4111111111111111";
+  }
 
-      // Expected output via reference redactWhole
+  const proseWords = ["the", "quick", "brown", "fox", "meeting", "invoice", "payment", "customer", "order", "status", "report", "system", "client", "service"];
+  const nearMisses = ["1234-56-7890", "123-45-67890", "a@b", "v1.2.3", "2024-05-18", "1999-12-31", "@handle", "user@.com", "12-34-5678", "user@-domain.com"];
+  const unicodeSamples = ["café ☕", "日本語テスト", "🚀🎉", "über", "naïve", "Москва", "hello世界"];
+
+  function generateFuzzText(): string {
+    const parts: string[] = [];
+    const count = 3 + Math.floor(rng() * 5);
+    for (let i = 0; i < count; i++) {
+      const kind = Math.floor(rng() * 10);
+      switch (kind) {
+        case 0: parts.push(proseWords[Math.floor(rng() * proseWords.length)]); break;
+        case 1: parts.push(`user${Math.floor(rng() * 1000)}@example.com`); break;
+        case 2: parts.push(`987-${String(Math.floor(rng() * 90) + 10)}-${String(Math.floor(rng() * 9000) + 1000)}`); break;
+        case 3: parts.push(makeLuhnCard(true)); break;
+        case 4: parts.push(makeLuhnCard(false)); break;
+        case 5: parts.push(nearMisses[Math.floor(rng() * nearMisses.length)]); break;
+        case 6: {
+          const len = 50 + Math.floor(rng() * 651);
+          let s = "";
+          for (let l = 0; l < len; l++) s += String.fromCharCode(97 + Math.floor(rng() * 26));
+          parts.push(s);
+          break;
+        }
+        case 7: {
+          const len = 30 + Math.floor(rng() * 71);
+          const chars = "0123456789 -";
+          let s = "";
+          for (let l = 0; l < len; l++) s += chars[Math.floor(rng() * chars.length)];
+          parts.push(s);
+          break;
+        }
+        case 8: {
+          parts.push(`(user${Math.floor(rng() * 100)}@test.com,${makeLuhnCard(true)}):987-65-4321.`);
+          break;
+        }
+        case 9: parts.push(unicodeSamples[Math.floor(rng() * unicodeSamples.length)]); break;
+      }
+    }
+    return parts.join(rng() < 0.5 ? " " : ", ");
+  }
+
+  it("verifies invariants 1 to 3 across 5000 random texts and chunkings", () => {
+    for (let iter = 0; iter < 5000; iter++) {
+      const text = generateFuzzText();
       const expected = redactWhole(text);
-
-      // Find all ground-truth PII substrings
       const matches = findMatches(text);
       const piiTexts = matches.map((m) => m.text!).filter(Boolean);
 
-      // Stream through redactor with random chunk sizes
-      const redactor = new StreamRedactor();
-      let streamed = "";
-      let offset = 0;
+      const chunkStrategies = [
+        () => [1], // 1-character chunks
+        () => [text.length + 100], // chunk larger than text
+        () => [1 + Math.floor(rng() * 15), 1 + Math.floor(rng() * 35)] // random variable chunks
+      ];
 
-      while (offset < text.length) {
-        // Chunk size between 1 and 25 (with occasional larger chunk)
-        let chunkSize = 1 + Math.floor(rng() * 25);
-        if (rng() < 0.05) chunkSize = 80;
-        const chunk = text.slice(offset, offset + chunkSize);
-        offset += chunkSize;
+      for (const getSizes of chunkStrategies) {
+        const chunkSizes = getSizes();
+        const redactor = new StreamRedactor();
+        let streamed = "";
+        let offset = 0;
+        let sizeIdx = 0;
 
-        const out = redactor.push(chunk);
-        streamed += out;
+        while (offset < text.length) {
+          const size = chunkSizes[sizeIdx % chunkSizes.length];
+          sizeIdx++;
+          const chunk = text.slice(offset, offset + size);
+          offset += size;
 
-        // Invariant 2: pending.length <= 320 + maxChunkSize
-        expect(redactor.pendingLength).toBeLessThanOrEqual(320 + chunk.length);
-      }
+          const out = redactor.push(chunk);
+          streamed += out;
 
-      streamed += redactor.flush();
+          if (redactor.pendingLength > 320 + chunk.length) {
+            expect.unreachable(
+              `Invariant 2 failed: pending length ${redactor.pendingLength} > 320 + ${chunk.length} on seed ${FUZZ_SEED}, iter ${iter}\nText: ${text}`
+            );
+          }
+        }
 
-      // Invariant 1: chunk-invariance
-      expect(streamed).toBe(expected);
+        streamed += redactor.flush();
 
-      // Invariant 3: no original PII substring appears in emitted output
-      for (const pii of piiTexts) {
-        expect(streamed.includes(pii)).toBe(false);
+        if (streamed !== expected) {
+          expect.unreachable(
+            `Invariant 1 failed on seed ${FUZZ_SEED}, iter ${iter}\nText: ${text}\nExpected: ${expected}\nStreamed: ${streamed}`
+          );
+        }
+
+        for (const pii of piiTexts) {
+          if (streamed.includes(pii)) {
+            expect.unreachable(
+              `Invariant 3 failed: leaked PII ${pii} on seed ${FUZZ_SEED}, iter ${iter}\nText: ${text}`
+            );
+          }
+        }
       }
     }
   });

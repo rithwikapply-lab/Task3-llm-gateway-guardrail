@@ -54,13 +54,17 @@ export function isValidLuhn(digitsStr: string): boolean {
  * Finds all non-overlapping PII matches in text, prioritizing start position,
  * longer matches first, and type tie-breaking (email > card > ssn).
  */
-export function findMatches(text: string): PiiMatch[] {
+export function findMatches(text: string, minStartIndex = 0): PiiMatch[] {
   const matches: PiiMatch[] = [];
 
   // 1. Email matches
   EMAIL_PATTERN.lastIndex = 0;
   let em: RegExpExecArray | null;
   while ((em = EMAIL_PATTERN.exec(text)) !== null) {
+    if (em.index < minStartIndex) {
+      EMAIL_PATTERN.lastIndex = em.index + 1;
+      continue;
+    }
     if (em[0].length <= 320) {
       matches.push({ start: em.index, end: em.index + em[0].length, type: "email", text: em[0] });
     }
@@ -70,6 +74,10 @@ export function findMatches(text: string): PiiMatch[] {
   SSN_PATTERN.lastIndex = 0;
   let sm: RegExpExecArray | null;
   while ((sm = SSN_PATTERN.exec(text)) !== null) {
+    if (sm.index < minStartIndex) {
+      SSN_PATTERN.lastIndex = sm.index + 1;
+      continue;
+    }
     matches.push({ start: sm.index, end: sm.index + sm[0].length, type: "ssn", text: sm[0] });
   }
 
@@ -77,6 +85,10 @@ export function findMatches(text: string): PiiMatch[] {
   CARD_PATTERN.lastIndex = 0;
   let cm: RegExpExecArray | null;
   while ((cm = CARD_PATTERN.exec(text)) !== null) {
+    if (cm.index < minStartIndex) {
+      CARD_PATTERN.lastIndex = cm.index + 1;
+      continue;
+    }
     if (isValidLuhn(cm[0])) {
       matches.push({ start: cm.index, end: cm.index + cm[0].length, type: "card", text: cm[0] });
     } else {
@@ -196,8 +208,8 @@ export class StreamRedactor {
     }
 
     // Find matches against ctx + pending
-    const matches = findMatches(this.ctx + this.pending);
     const ctxLen = this.ctx.length;
+    const matches = findMatches(this.ctx + this.pending, ctxLen);
 
     // Convert matches to pending coordinates.
     // Matches with start < ctxLen start inside ctx (which was already emitted);
@@ -249,8 +261,8 @@ export class StreamRedactor {
   }
 
   flush(): string {
-    const matches = findMatches(this.ctx + this.pending);
     const ctxLen = this.ctx.length;
+    const matches = findMatches(this.ctx + this.pending, ctxLen);
 
     const pendingMatches: PiiMatch[] = [];
     for (const m of matches) {
