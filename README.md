@@ -143,12 +143,14 @@ Sequence executed in order: **50 MB x4**, then **200 MB x2**, then **1.3 MB** ag
 
 ### Understanding RSS vs HeapUsed
 - **Post-GC `heapUsed` returns to baseline**: Starting from an initial baseline of 8.81 MB, `heapUsed` measured immediately after garbage collection stays strictly within ~9.6–11.0 MB across all 7 runs—even after processing over 820 MB of cumulative SSE stream data. No per-request state, loggers, or streams accumulate over time.
-- **RSS Retention**: Resident Set Size (RSS) measures the total OS memory pages allocated to the process. V8 requests memory pages from the operating system during initial high-throughput allocations (growing to ~255 MB over runs 1–3), and then retains those committed pages for subsequent workloads rather than returning them to the OS. Once established, Peak Delta drops to virtually zero (0.09 MB on Run 4, 0.22 MB on Run 6), and 200 MB streams add only 5.67 MB of peak delta.
+- **RSS behaviour (measured, not explained):** RSS rose from about 66 MB to about 255 MB over the first three 50 MB runs and then stayed roughly flat through the 200 MB runs, while post-GC `heapUsed` stayed near 10 MB. The retained memory is therefore outside the JavaScript heap. The cause was not isolated: `external` and `arrayBuffers` were not recorded in this benchmark.
 
 ### Throughput & Latency Honesty
 - **Direct Provider Throughput**: ~145–148 MB/s (pure synthetic localhost stream).
 - **Gateway Guardrail Throughput**: ~30 MB/s of SSE wire bytes (approximately 160,000 token chunk events per second at ~188 bytes per event), with sub-2.5 ms TTFT.
 - **Production Context**: Real-world LLM inference streams emit roughly 20 to 100 tokens per second (under 20 KB/s per client connection). At ~30 MB/s capacity, the gateway is more than three orders of magnitude faster than actual LLM generation speeds, introducing negligible overhead in real deployments.
+
+- **CPU profile caveat:** In the CPU profile, `(idle)` was the top entry (about 44 to 53% of samples), so the gateway was not CPU-bound in that test. The before/after throughput figures used a separate Python load generator and are indicative, not a gateway limit.
 
 ## Error Handling
 
