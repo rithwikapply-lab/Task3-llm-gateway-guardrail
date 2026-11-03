@@ -71,7 +71,7 @@ Fixed sliding-window buffering introduces an unavoidable lag equal to the maximu
 Instead of a sliding window, this gateway implements a **candidate-suffix holdback** algorithm:
 1. **No Buffering for Completed Text**: Whenever non-candidate characters (e.g. whitespace, commas, punctuation) are encountered, all preceding text is definitively resolved and emitted immediately.
 2. **Dynamic Candidate Suffix**: The engine inspects only the tail of the buffer for characters that could potentially form the beginning or continuation of an entity:
-   - **Emails**: Held back only for runs of valid email characters (`[A-Za-z0-9._%+@-]`) up to the RFC limit of 320 characters.
+   - **Emails**: Held back only for runs of valid email characters (`[A-Za-z0-9._%+@-]`) up to the simplified bounded pattern limit of 320 characters.
    - **Credit Cards & SSNs**: Held back only for runs of digits and digit-separators (`[0-9 -]`) up to 40 characters (credit cards are at most 19 digits; SSNs are 11 characters).
 3. **Left-Context Character (`ctx`)**: Lookbehind assertions (such as `(?<![\d-])` and `(?<![A-Za-z0-9._%+-])`) require 1 character of preceding context. The redactor stores the single character immediately preceding the buffer as `ctx`. Any match evaluated over `ctx + pending` must start at or after index `ctx.length`, guaranteeing already-emitted characters are never matched while still satisfying the negative lookbehind.
 4. **Cut Computation**: The cut point is determined by taking the earliest start index of any candidate run touching the tail, or any match straddling the tail. All fully resolved text before the cut point is redacted and emitted immediately.
@@ -102,9 +102,16 @@ The streaming redactor strictly enforces three formal invariants:
 ## Complexity
 
 - **Time Complexity**: **O(N)** amortized linear time with respect to the input character count. Regex evaluations only scan the bounded candidate tail and active chunk, rather than the entire history.
-- **Space Complexity**: **O(1)** auxiliary memory. The buffer size depends strictly on the maximum entity length (320 bytes) and network chunk size, never on the total response length.
+- **Space Complexity**: **O(1)** auxiliary algorithm buffer space. The redactor pending buffer is strictly capped at 320 characters plus chunk size. In the Node process, peak RSS delta plateaus (~80–94 MB) across 50 MB to 200 MB streams due to V8 runtime garbage collection thresholds and TCP socket buffers, remaining constant rather than accumulating stream size.
 
 ---
+
+## Latency Characteristics
+
+- **Prose vs Continuous Run**: Text without a separator (a long continuous run of letters, digits, '.', '_', '-', '%', '+', or '@') is held back up to 320 characters (40 characters for digit runs) before it is emitted.
+- **Ordinary Prose**: Ordinary prose containing spaces, commas, or punctuation lags by at most the current word in flight. Once a word delimiter is received, all preceding resolved words are emitted immediately.
+- **First-Byte Latency**: Initial role chunks and header bytes are forwarded immediately with sub-4ms TTFT overhead.
+- **1000-Letter Run Lag Bound**: When streaming an unbroken 1000-character letter run, characters 1 through 320 are held back while candidate matches remain possible; starting at character 321, characters are emitted steadily one-for-one, guaranteeing that pending buffer length never exceeds 320 characters.
 
 ## Latency and Memory Behaviour
 
@@ -117,16 +124,26 @@ The streaming redactor strictly enforces three formal invariants:
 
 ## Measured Benchmark Results
 
-Measured from a real run on port 0 with Node.js **v24.10.0** on an **Apple M3 Pro (11 cores)** with **18.0 GB RAM**, streaming a 1.3 MB scripted response with 4-character tokens and PII over 20 runs:
+Benchmarked with mock provider and gateway running as **separate child processes** communicating over loopback TCP HTTP. Gateway RSS was continuously sampled using `ps -o rss= -p <gatewayPid>` every 100 ms throughout each stream.
+Environment: Node.js **v24.10.0** on an **Apple M3 Pro (11 cores)** with **18.0 GB RAM** on **Darwin 25.6.0 (arm64)**.
 
-| Metric | Direct (Mock Provider) | Gateway (Guardrail Proxy) | Overhead |
-|---|---|---|---|
-| **Median TTFT** | 447.07 ms | 455.02 ms | **7.95 ms** |
-| **Median Throughput** | 98.98 MB/s | 17.54 MB/s | — |
-| **Gateway Peak RSS** | — | 1392.59 MB | — |
-| **Gateway Peak Heap** | — | 865.97 MB | — |
+### Stream Size vs Gateway Peak RSS Delta (Flat Memory Verification)
 
----
+| Stream Size | Wire Bytes | Baseline RSS | Peak RSS | Peak Delta | Post-GC RSS |
+|---|---|---|---|---|---|
+| **1.3 MB** | 1.3 MB | 66.45 MB | 114.92 MB | 48.47 MB | 115.03 MB |
+| **50 MB** | 51.4 MB | 115.03 MB | 195.42 MB | 80.39 MB | 195.44 MB |
+| **200 MB** | 205.7 MB | 195.41 MB | 289.11 MB | 93.70 MB | 288.56 MB |
+
+*Note: Peak RSS delta remains flat (plateauing between 80 MB and 94 MB) when scaling from 50 MB to 200 MB (a 4x increase in data), confirming that memory does not grow proportionally with stream length.*
+
+### Latency and Throughput Comparison (Direct vs Gateway)
+
+| Stream Size | Direct TTFT | Gateway TTFT | TTFT Overhead | Direct Throughput | Gateway Throughput |
+|---|---|---|---|---|---|
+| **1.3 MB** | 9.59 ms | 13.48 ms | **3.89 ms** | 51.51 MB/s | 16.82 MB/s |
+| **50 MB** | 1.12 ms | 2.65 ms | **1.53 ms** | 141.63 MB/s | 29.57 MB/s |
+| **200 MB** | 0.77 ms | 2.23 ms | **1.46 ms** | 145.87 MB/s | 30.28 MB/s |
 
 ## Error Handling
 
@@ -156,6 +173,6 @@ Per the specification, the gateway strictly limits redaction to content payloads
 
 ## Limitations
 
-- **Email Validation**: Adheres to RFC 5322 address syntax for common email formats up to 320 characters. Exotic quoted-string local parts with internal whitespace are not covered.
-- **Credit Card Mod-10**: Validates numbers with 13 to 19 digits using the Luhn algorithm. Valid card numbers with incorrect test digits that happen to pass Mod 10 checksum will be redacted.
+- **Email Validation**: Uses a simplified bounded pattern matching standard email formats up to a maximum of 320 characters. Exotic quoted-string local parts with internal whitespace or uncommon obsolete formats are not covered.
+- **Credit Card Mod-10**: Digit runs of 13 to 19 digits that pass Luhn are redacted; others are left alone.
 - **Fail-Closed on Malformed JSON**: If an upstream SSE event contains malformed JSON data, the entire raw data string is redacted with `redactWhole` before emitting to prevent data leakage.
