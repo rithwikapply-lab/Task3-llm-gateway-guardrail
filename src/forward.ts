@@ -215,12 +215,14 @@ export async function forwardChatCompletion(
   }
 
   // Response headers for SSE
+  res.socket?.setNoDelay(true);
   res.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache",
     "Connection": "keep-alive",
     "X-Accel-Buffering": "no"
   });
+  res.flushHeaders?.();
 
   const parser = new SseParser(config.maxEventBytes);
   const transformer = new StreamTransformer();
@@ -232,14 +234,24 @@ export async function forwardChatCompletion(
     return;
   }
 
-  const writeEventWithBackpressure = async (wire: string): Promise<void> => {
+  const writeWithBackpressure = async (wire: string): Promise<void> => {
+    if (wire.length === 0) return;
     if (ttftMs === null) {
       ttftMs = Math.round(performance.now() - startTime);
     }
     bytesOut += Buffer.byteLength(wire);
     const ok = res.write(wire);
-    if (!ok && !clientDisconnected) {
-      await new Promise<void>((resolve) => res.once("drain", resolve));
+    if (!ok && !clientDisconnected && !res.writableEnded && !res.destroyed) {
+      await new Promise<void>((resolve) => {
+        const onDrain = () => { cleanup(); resolve(); };
+        const onClose = () => { cleanup(); resolve(); };
+        const cleanup = () => {
+          res.removeListener("drain", onDrain);
+          res.removeListener("close", onClose);
+        };
+        res.on("drain", onDrain);
+        res.on("close", onClose);
+      });
     }
   };
 
@@ -268,8 +280,13 @@ export async function forwardChatCompletion(
         bytesIn += chunk.byteLength;
         const messages = parser.push(chunk);
         if (messages.length > 0) {
-          for await (const outMsg of transformer.transform(messages)) {
-            await writeEventWithBackpressure(outMsg.raw);
+          // Coalesce all output events from this upstream network chunk into a single write
+          let coalesced = "";
+          for (const outMsg of transformer.transform(messages)) {
+            coalesced += outMsg.raw;
+          }
+          if (coalesced.length > 0) {
+            await writeWithBackpressure(coalesced);
           }
         }
       }
@@ -278,39 +295,44 @@ export async function forwardChatCompletion(
     // Upstream stream completed cleanly
     upstreamFinished = true;
     const flushed = parser.flush();
+    let endCoalesced = "";
     if (flushed.length > 0) {
-      for await (const outMsg of transformer.transform(flushed)) {
-        await writeEventWithBackpressure(outMsg.raw);
+      for (const outMsg of transformer.transform(flushed)) {
+        endCoalesced += outMsg.raw;
       }
     }
     for (const outMsg of transformer.flush()) {
-      await writeEventWithBackpressure(outMsg.raw);
+      endCoalesced += outMsg.raw;
+    }
+    if (endCoalesced.length > 0) {
+      await writeWithBackpressure(endCoalesced);
     }
     res.end();
   } catch (err: any) {
     upstreamFinished = true;
     if (!clientDisconnected) {
       // Flush held text first before sending error
+      let errCoalesced = "";
       try {
         const remaining = parser.flush();
         if (remaining.length > 0) {
-          for await (const outMsg of transformer.transform(remaining)) {
-            await writeEventWithBackpressure(outMsg.raw);
+          for (const outMsg of transformer.transform(remaining)) {
+            errCoalesced += outMsg.raw;
           }
         }
         for (const outMsg of transformer.flush()) {
-          await writeEventWithBackpressure(outMsg.raw);
+          errCoalesced += outMsg.raw;
         }
       } catch {}
 
       const isTimeout = err?.message === "Upstream idle timeout";
       const errMsg = isTimeout ? "Upstream idle timeout" : "Upstream connection dropped";
       const errType = isTimeout ? "timeout_error" : "upstream_drop";
-      const errWire = formatSseEvent(
+      errCoalesced += formatSseEvent(
         JSON.stringify({ error: { message: errMsg, type: errType } }),
         "error"
       );
-      await writeEventWithBackpressure(errWire);
+      await writeWithBackpressure(errCoalesced);
       res.end();
     }
   } finally {

@@ -152,11 +152,13 @@ export class MockProviderServer {
       }
 
       // Streaming SSE response
+      res.socket?.setNoDelay(true);
       res.writeHead(200, {
         "Content-Type": "text/event-stream; charset=utf-8",
         "Cache-Control": "no-cache",
         "Connection": "keep-alive"
       });
+      res.flushHeaders?.();
 
       const chunkSizes = mock.chunkSizes && mock.chunkSizes.length > 0 ? mock.chunkSizes : [4];
       let step = 1;
@@ -176,9 +178,31 @@ export class MockProviderServer {
           await this.waitForRelease(step);
         }
 
-        res.write(`data: ${data}\n\n`);
+        if (res.destroyed || res.writableEnded) {
+          return false;
+        }
+
+        const canWrite = res.write(`data: ${data}\n\n`);
         step++;
-        return true;
+        if (!canWrite && !res.writableEnded && !res.destroyed) {
+          await new Promise<void>((resolve) => {
+            const onDrain = () => {
+              cleanup();
+              resolve();
+            };
+            const onClose = () => {
+              cleanup();
+              resolve();
+            };
+            const cleanup = () => {
+              res.removeListener("drain", onDrain);
+              res.removeListener("close", onClose);
+            };
+            res.on("drain", onDrain);
+            res.on("close", onClose);
+          });
+        }
+        return !res.destroyed && !res.writableEnded;
       };
 
       // 1. Multi-choice support
@@ -416,8 +440,9 @@ export function createMockProvider(port = 4001): MockProviderServer {
 
 // Standalone execution
 if (process.argv[1] && process.argv[1].endsWith("provider.js")) {
-  const provider = createMockProvider(4001);
-  provider.start().then((port) => {
-    process.stdout.write(`Mock provider listening on port ${port}\n`);
+  const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 4001;
+  const provider = createMockProvider(port);
+  provider.start().then((actualPort) => {
+    process.stdout.write(`Mock provider listening on port ${actualPort}\n`);
   });
 }

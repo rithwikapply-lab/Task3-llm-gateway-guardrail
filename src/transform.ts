@@ -50,6 +50,13 @@ export class StreamTransformer {
     }
   }
 
+  private hasAnyPending(): boolean {
+    for (const r of this.redactors.values()) {
+      if (r.pendingLength > 0) return true;
+    }
+    return false;
+  }
+
   getStats(): TransformStats {
     let charsIn = 0;
     let charsOut = 0;
@@ -73,8 +80,8 @@ export class StreamTransformer {
     };
   }
 
-  async *transform(source: Iterable<SseMessage> | AsyncIterable<SseMessage>): AsyncGenerator<SseMessage> {
-    for await (const msg of source) {
+  *transform(source: Iterable<SseMessage>): Generator<SseMessage> {
+    for (const msg of source) {
       // Pass through comments directly
       if (msg.type === "comment") {
         yield msg;
@@ -85,9 +92,26 @@ export class StreamTransformer {
 
       // Handle [DONE]
       if (event.data === "[DONE]") {
-        
         yield event;
         return;
+      }
+
+      // If data is not a JSON object, fail-closed: redact over whole data string
+      const trimmed = event.data.trim();
+      if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) {
+        yield makeSseEvent(redactWhole(event.data), event.event, event.id);
+        continue;
+      }
+
+      // Fast path: if data string contains no "content" and no "arguments",
+      // forward as raw bytes without JSON.parse/stringify unless there is finish_reason with pending redactions.
+      const hasContentField = event.data.includes('"content"');
+      const hasArgsField = event.data.includes('"arguments"');
+      const hasFinishReason = event.data.includes('"finish_reason"');
+
+      if (!hasContentField && !hasArgsField && (!hasFinishReason || !this.hasAnyPending())) {
+        yield event;
+        continue;
       }
 
       // Try parsing JSON payload

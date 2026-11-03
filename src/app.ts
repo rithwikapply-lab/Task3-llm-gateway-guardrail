@@ -15,6 +15,14 @@ export function createApp(config: GatewayConfig, logger: Logger = defaultLogger)
     res.status(200).json({ status: "ok" });
   });
 
+  // Debug GC endpoint (active when started with node --expose-gc)
+  if (typeof (global as any).gc === "function") {
+    app.post("/__gc", (_req: Request, res: Response) => {
+      (global as any).gc();
+      res.status(200).json({ ok: true });
+    });
+  }
+
   // Request ID middleware
   app.use((req: Request, res: Response, next: NextFunction) => {
     const headerReqId = req.headers["x-request-id"];

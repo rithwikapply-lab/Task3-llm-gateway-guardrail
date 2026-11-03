@@ -183,8 +183,8 @@ export class StreamRedactor {
 
     const holdStart = Math.min(emailHoldStart, digitHoldStart);
 
-    // Fast path: if no @ and no digit in pending and no digit in ctx, no full match is possible
-    if (!this.pending.includes("@") && !/\d/.test(this.pending) && !/\d/.test(this.ctx)) {
+    // Fast path: skip regexes when pending has no "@" and no digit
+    if (!this.pending.includes("@") && !/\d/.test(this.pending)) {
       const cut = holdStart;
       const toEmit = this.pending.slice(0, cut);
       if (toEmit.length > 0) {

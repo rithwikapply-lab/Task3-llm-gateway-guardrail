@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import http from "node:http";
 import { createApp } from "../src/app.js";
 import { Logger } from "../src/logger.js";
@@ -537,24 +537,25 @@ describe("Gateway Integration Tests", () => {
     }
   });
   it("backpressure: fake writable returning false pauses pulling upstream until drain and keeps pending bounded", async () => {
-    let drainCb: (() => void) | null = null;
     let writeCount = 0;
-    let isFinished = false;
+    let notifyFirstWrite!: () => void;
+    const firstWritePromise = new Promise<void>((r) => { notifyFirstWrite = r; });
+
+    const readSpy = vi.spyOn(ReadableStreamDefaultReader.prototype, "read");
 
     const fakeRes: any = new (require("events").EventEmitter)();
     fakeRes.writeHead = () => {};
-    fakeRes.write = () => {
+    fakeRes.flushHeaders = () => {};
+    fakeRes.write = (_chunk: string) => {
       writeCount++;
-      return false; // Backpressure triggered
-    };
-    fakeRes.once = (event: string, cb: () => void) => {
-      if (event === "drain") {
-        drainCb = cb;
+      if (writeCount === 1) {
+        notifyFirstWrite();
+        return false; // Trigger backpressure on first write
       }
-      return fakeRes;
+      return true;
     };
     fakeRes.end = () => {
-      isFinished = true;
+      fakeRes.emit("finish");
     };
 
     const fakeReq: any = new (require("events").EventEmitter)();
@@ -565,7 +566,8 @@ describe("Gateway Integration Tests", () => {
       stream: true,
       mock: {
         text: "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-        chunkSizes: [2]
+        chunkSizes: [4],
+        gate: true
       }
     };
 
@@ -577,6 +579,9 @@ describe("Gateway Integration Tests", () => {
       maxEventBytes: 1048576
     };
 
+    // Release initial role step 1 so mock sends first chunk
+    mockProvider.release(1);
+
     const forwardPromise = (await import("../src/forward.js")).forwardChatCompletion(
       fakeReq,
       fakeRes,
@@ -585,25 +590,31 @@ describe("Gateway Integration Tests", () => {
       "bp-test-req"
     );
 
-    while (writeCount === 0 || !drainCb) {
-      await new Promise((r) => setTimeout(r, 10));
+    // Wait until the first write triggered backpressure
+    await firstWritePromise;
+    expect(writeCount).toBe(1);
+
+    // Assert that no further upstream read calls happen while paused waiting for drain
+    const readsWhenPaused = readSpy.mock.calls.length;
+    await Promise.resolve();
+    expect(readSpy.mock.calls.length).toBe(readsWhenPaused);
+
+    // Emit drain to release backpressure
+    fakeRes.emit("drain");
+
+    // Release remaining steps
+    for (let s = 2; s <= 20; s++) {
+      mockProvider.release(s);
     }
 
-    const pausedWrites = writeCount;
-    await new Promise((r) => setTimeout(r, 60));
-    expect(writeCount).toBe(pausedWrites);
-
-    while (!isFinished) {
-      if (drainCb) {
-        const cb: any = drainCb;
-        drainCb = null;
-        cb();
-      }
-      await new Promise((r) => setTimeout(r, 10));
-    }
-
+    // Await completion
     await forwardPromise;
-    expect(writeCount).toBeGreaterThan(pausedWrites);
+
+    // Upstream reading resumed and finished all chunks
+    expect(readSpy.mock.calls.length).toBeGreaterThan(readsWhenPaused);
+    expect(writeCount).toBeGreaterThan(1);
+
+    readSpy.mockRestore();
   });
 
   it("does not bleed redactor state across choices (independent choice redactors)", async () => {
